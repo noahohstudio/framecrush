@@ -6,8 +6,31 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-const app = express();
-app.use(cors());
+import cors from "cors";
+
+const allowedOrigins = [
+  "https://framecrush.net",
+  "https://www.framecrush.net",
+  "https://framecrush.vercel.app",
+];
+
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // allow server-to-server & curl requests
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Not allowed by CORS"));
+    },
+    methods: ["GET", "POST"],
+    credentials: true,
+  })
+);
+
 
 
 

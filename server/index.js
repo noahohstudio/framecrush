@@ -117,7 +117,40 @@ async function handleCrush(req, res) {
   }
 }
 
-app.post("/crush", upload.single("video"), handleCrush);
+// accept both old + new routes
+app.post(["/crush", "/api/grunge"], upload.single("video"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const inputPath = req.file.path;
+    const outputPath = path.join(outputDir, `crushed-${Date.now()}.mp4`);
+
+    const command = `
+      ffmpeg -y -i "${inputPath}" \
+      -vf "fps=12,eq=contrast=1.2:brightness=0.02:saturation=0.8" \
+      -crf 28 \
+      "${outputPath}"
+    `;
+
+    exec(command, (error) => {
+      if (error) {
+        console.error("FFmpeg error:", error);
+        return res.status(500).json({ error: "Video processing failed" });
+      }
+
+      res.download(outputPath, () => {
+        try { fs.unlinkSync(inputPath); } catch {}
+        try { fs.unlinkSync(outputPath); } catch {}
+      });
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 app.post("/api/grunge", upload.single("video"), handleCrush);
 
 // Optional: if your frontend also hits other /api/* endpoints,

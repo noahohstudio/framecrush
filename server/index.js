@@ -6,117 +6,123 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 
-// --------------------
-// Setup
-// --------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// --------------------
-// CORS (IMPORTANT)
-// --------------------
-const allowedOrigins = [
+/**
+ * IMPORTANT:
+ * - Include your prod domains + localhost
+ * - Include your Vercel preview domain too (optional but helpful)
+ */
+const allowedOrigins = new Set([
   "http://localhost:3000",
   "https://framecrush.net",
-  "https://www.framecrush.net"
-];
+  "https://www.framecrush.net",
+  // If you ever test via the default vercel domain, add it:
+  // "https://framecrush.vercel.app",
+]);
+
+app.use((req, res, next) => {
+  // Helpful for debugging in Railway logs
+  console.log(`${req.method} ${req.url} Origin=${req.headers.origin || "none"}`);
+  next();
+});
 
 app.use(
   cors({
-    origin: function (origin, callback) {
-      // Allow server-to-server & tools like curl
+    origin(origin, callback) {
+      // Allow server-to-server, curl, Railway health checks, etc.
       if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
+      if (allowedOrigins.has(origin)) return callback(null, true);
 
-      return callback(new Error("CORS not allowed"));
+      return callback(new Error(`CORS not allowed for origin: ${origin}`));
     },
-    methods: ["GET", "POST"],
-    credentials: true
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
-// --------------------
-// Middleware
-// --------------------
+// Ensure preflight always returns correctly
+app.options("*", cors());
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --------------------
-// File upload (multer)
-// --------------------
 const uploadDir = path.join(__dirname, "uploads");
 const outputDir = path.join(__dirname, "outputs");
 
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
-if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
 const upload = multer({
   dest: uploadDir,
-  limits: {
-    fileSize: 150 * 1024 * 1024 // 150MB
-  }
+  limits: { fileSize: 150 * 1024 * 1024 }, // 150MB
 });
 
-// --------------------
-// Health check (Railway / Vercel sanity)
-// --------------------
-app.get("/", (req, res) => {
-  res.send("Framecrush API is running");
-});
+app.get("/", (req, res) => res.send("Framecrush API is running"));
+app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
 
-app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok" });
-});
+/**
+ * Core processing function
+ * (You can expand this later; for now we just need it working reliably.)
+ */
+function runFfmpeg(inputPath, outputPath, cb) {
+  const command = [
+    `ffmpeg -y -i "${inputPath}"`,
+    `-vf "fps=12,eq=contrast=1.2:brightness=0.02:saturation=0.8"`,
+    `-crf 28`,
+    `"${outputPath}"`,
+  ].join(" ");
 
-// --------------------
-// Crush endpoint (placeholder FFmpeg pipeline)
-// --------------------
-app.post("/crush", upload.single("video"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
+  exec(command, (error, stdout, stderr) => {
+    if (error) {
+      console.error("FFmpeg error:", error);
+      console.error("FFmpeg stderr:", stderr);
+      return cb(error);
     }
+    cb(null);
+  });
+}
+
+/**
+ * IMPORTANT:
+ * Your frontend is calling /api/grunge
+ * So we expose that (and keep /crush too).
+ */
+async function handleCrush(req, res) {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
     const inputPath = req.file.path;
-    const outputPath = path.join(
-      outputDir,
-      `crushed-${Date.now()}.mp4`
-    );
+    const outputPath = path.join(outputDir, `crushed-${Date.now()}.mp4`);
 
-    // VERY BASIC FFmpeg example (safe default)
-    const command = `
-      ffmpeg -y -i "${inputPath}" \
-      -vf "fps=12,eq=contrast=1.2:brightness=0.02:saturation=0.8" \
-      -crf 28 \
-      "${outputPath}"
-    `;
+    runFfmpeg(inputPath, outputPath, (err) => {
+      if (err) return res.status(500).json({ error: "Video processing failed" });
 
-    exec(command, (error) => {
-      if (error) {
-        console.error("FFmpeg error:", error);
-        return res.status(500).json({ error: "Video processing failed" });
-      }
+      res.download(outputPath, (downloadErr) => {
+        // Cleanup
+        try { fs.unlinkSync(inputPath); } catch {}
+        try { fs.unlinkSync(outputPath); } catch {}
 
-      res.download(outputPath, () => {
-        fs.unlinkSync(inputPath);
-        fs.unlinkSync(outputPath);
+        if (downloadErr) console.error("Download error:", downloadErr);
       });
     });
   } catch (err) {
-    console.error(err);
+    console.error("Server error:", err);
     res.status(500).json({ error: "Server error" });
   }
-});
+}
 
-// --------------------
-// Start server
-// --------------------
+app.post("/crush", upload.single("video"), handleCrush);
+app.post("/api/grunge", upload.single("video"), handleCrush);
+
+// Optional: if your frontend also hits other /api/* endpoints,
+// you can add more aliases here later.
+
 app.listen(PORT, () => {
   console.log(`Framecrush API running on port ${PORT}`);
 });

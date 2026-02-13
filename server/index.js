@@ -161,3 +161,14 @@ app.post("/api/grunge", upload.single("video"), handleCrush);
 app.listen(PORT, () => {
   console.log(`Framecrush API running on port ${PORT}`);
 });
+
+app.post("/api/grunge", upload.single("video"), (req, res) => {
+  // forward to your existing crush handler logic
+  req.url = "/crush";
+  app.handle(req, res);
+});
+
+app.post("/api/crush", upload.single("video"), (req, res) => {
+  req.url = "/crush";
+  app.handle(req, res);
+});

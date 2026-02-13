@@ -64,7 +64,7 @@ const upload = multer({
 });
 
 app.get("/", (req, res) => res.send("Framecrush API is running"));
-app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
+app.get("/health", (req, res) => res.send("health-ok-123"));
 
 /**
  * Core processing function

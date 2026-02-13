@@ -172,3 +172,38 @@ app.post("/api/crush", upload.single("video"), (req, res) => {
   req.url = "/crush";
   app.handle(req, res);
 });
+
+
+// ---- One handler, multiple routes ----
+const crushHandler = (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    const inputPath = req.file.path;
+    const outputPath = path.join(outputDir, `crushed-${Date.now()}.mp4`);
+
+    const command = `ffmpeg -y -i "${inputPath}" -vf "fps=12,eq=contrast=1.2:brightness=0.02:saturation=0.8" -crf 28 "${outputPath}"`;
+
+    exec(command, (error) => {
+      if (error) {
+        console.error("FFmpeg error:", error);
+        return res.status(500).json({ error: "Video processing failed" });
+      }
+
+      res.download(outputPath, () => {
+        try { fs.unlinkSync(inputPath); } catch {}
+        try { fs.unlinkSync(outputPath); } catch {}
+      });
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// Frontend expects these:
+app.post("/api/grunge", upload.single("video"), crushHandler);
+app.post("/api/crush", upload.single("video"), crushHandler);
+
+// (Optional legacy)
+app.post("/crush", upload.single("video"), crushHandler);

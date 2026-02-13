@@ -1,3 +1,5 @@
+console.log("✅ FRAMECRUSH BACKEND BOOTED - VERSION A");
+
 import express from "express";
 import cors from "cors";
 import multer from "multer";

@@ -118,7 +118,7 @@ async function handleCrush(req, res) {
 }
 
 // accept both old + new routes
-app.post(["/crush", "/api/grunge"], upload.single("video"), async (req, res) => {
+app.post("/api/grunge", upload.single("video"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });

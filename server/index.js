@@ -14,6 +14,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+
 // --------------------
 // CORS (strict + preflight)
 // --------------------
@@ -73,6 +74,10 @@ const upload = multer({
 // --------------------
 app.get("/", (req, res) => res.send("Framecrush API is running"));
 app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
+app.get("/version", (req, res) => {
+  res.send("FRAMECRUSH_BACKEND_VERSION_1");
+});
+
 
 // --------------------
 // Core processing handler

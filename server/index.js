@@ -1,22 +1,18 @@
 import express from "express";
 import multer from "multer";
-import { execFile } from "child_process";
+import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 
-// --------------------
-// Setup
-// --------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-
 // --------------------
-// CORS (strict + preflight)
+// CORS + preflight
 // --------------------
 const allowedOrigins = new Set([
   "https://framecrush.net",
@@ -27,24 +23,15 @@ const allowedOrigins = new Set([
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
-  // If the request has an Origin and it's allowed, echo it back
   if (origin && allowedOrigins.has(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
-
-  // Helps caches behave correctly when origin varies
   res.setHeader("Vary", "Origin");
-
-  res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
 
-  // Preflight request
   if (req.method === "OPTIONS") return res.sendStatus(204);
-
   next();
 });
 
@@ -55,15 +42,13 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // --------------------
-// Upload + output folders
+// Storage
 // --------------------
 const uploadDir = path.join(__dirname, "uploads");
 const outputDir = path.join(__dirname, "outputs");
+fs.mkdirSync(uploadDir, { recursive: true });
+fs.mkdirSync(outputDir, { recursive: true });
 
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-
-// Multer: expects field name "video"
 const upload = multer({
   dest: uploadDir,
   limits: { fileSize: 150 * 1024 * 1024 }, // 150MB
@@ -74,85 +59,95 @@ const upload = multer({
 // --------------------
 app.get("/", (req, res) => res.send("Framecrush API is running"));
 app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
-app.get("/version", (req, res) => {
-  res.send("FRAMECRUSH_BACKEND_VERSION_1");
-});
 
+function safeUnlink(p) {
+  try {
+    if (p && fs.existsSync(p)) fs.unlinkSync(p);
+  } catch {}
+}
 
 // --------------------
-// Core processing handler
+// Core FFmpeg runner (FORCES re-encode + obvious effect)
 // --------------------
-function runFfmpeg({ inputPath, outputPath }, cb) {
-  // NOTE: This requires ffmpeg to exist in the Railway environment.
-  // If you get "ffmpeg not found" in logs, we’ll fix Dockerfile next.
+function runFfmpeg(inputPath, outputPath) {
+  // OBVIOUS effect so you can’t miss it:
+  // - fps=8 (choppy)
+  // - scale=320 wide (tiny)
+  // - heavy contrast + lowered saturation
+  // - add noise grain
+  // - force x264 encode + aac audio so it definitely changes
+  const vf =
+    "fps=8,scale=320:-2," +
+    "eq=contrast=1.6:brightness=-0.06:saturation=0.55," +
+    "noise=alls=20:allf=t";
+
   const args = [
     "-y",
     "-i",
     inputPath,
     "-vf",
-    "fps=12,eq=contrast=1.2:brightness=0.02:saturation=0.8",
+    vf,
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
     "-crf",
-    "28",
+    "34",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "128k",
     outputPath,
   ];
 
-  execFile("ffmpeg", args, (err, stdout, stderr) => {
-    if (err) return cb(err, { stdout, stderr });
-    cb(null, { stdout, stderr });
-  });
-}
+  console.log("🎥 FFmpeg args:", args.join(" "));
 
-function safeUnlink(filePath) {
-  try {
-    if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch (_) {}
+  return new Promise((resolve, reject) => {
+    const ff = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+
+    let stderr = "";
+    ff.stderr.on("data", (d) => (stderr += d.toString()));
+
+    ff.on("close", (code) => {
+      if (code === 0) return resolve();
+      console.error("❌ FFmpeg failed:", stderr);
+      reject(new Error("ffmpeg failed"));
+    });
+  });
 }
 
 async function handleCrush(req, res) {
   try {
     if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded (field: video)" });
+      return res.status(400).json({ error: 'No file uploaded (field must be "video")' });
     }
 
     const inputPath = req.file.path;
-    const outputPath = path.join(outputDir, `crushed-${Date.now()}.mp4`);
 
-    runFfmpeg({ inputPath, outputPath }, (err, logs) => {
-      if (err) {
-        console.error("FFmpeg failed:", err);
-        console.error("FFmpeg stderr:", logs?.stderr);
-        safeUnlink(inputPath);
-        safeUnlink(outputPath);
-        return res.status(500).json({ error: "Video processing failed" });
-      }
+    // unique output name each time
+    const outputPath = path.join(outputDir, `framecrush-${Date.now()}-${Math.random().toString(16).slice(2)}.mp4`);
 
-      // Send file to client
-      res.download(outputPath, "framecrush.mp4", (downloadErr) => {
-        if (downloadErr) console.error("Download error:", downloadErr);
-        safeUnlink(inputPath);
-        safeUnlink(outputPath);
-      });
+    await runFfmpeg(inputPath, outputPath);
+
+    // IMPORTANT: download OUTPUT (not input)
+    res.download(outputPath, "framecrush.mp4", (err) => {
+      if (err) console.error("Download error:", err);
+      safeUnlink(inputPath);
+      safeUnlink(outputPath);
     });
   } catch (e) {
     console.error("Server error:", e);
-    return res.status(500).json({ error: "Server error" });
+    return res.status(500).json({ error: "processing failed" });
   }
 }
 
-// --------------------
-// Routes (match your UI)
-// --------------------
+// Routes your frontend might call
 app.post("/api/grunge", upload.single("video"), handleCrush);
 app.post("/api/crush", upload.single("video"), handleCrush);
+app.post("/crush", upload.single("video"), handleCrush); // optional legacy
 
-// Helpful 404 for API routes (so you don't get confusing HTML errors)
-app.use("/api", (req, res) => {
-  res.status(404).json({ error: "API route not found" });
-});
-
-// --------------------
-// Start
-// --------------------
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Framecrush API running on port ${PORT}`);
 });

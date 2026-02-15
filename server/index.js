@@ -64,34 +64,59 @@ app.get("/", (req, res) => res.send("Framecrush API is running"));
 app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
 
 // --------------------
-// FFmpeg runner (final look)
+// Helpers: parse + fallback aliases
 // --------------------
-function runFfmpeg({ inputPath, outputPath, fps, crunchWidth, grain, contrast, brightness, saturation, crf }) {
-  // Keep it “grunge” but not nuclear:
-  // - fps (frame drop)
-  // - scale down then scale back up with nearest neighbor to get crunchy pixels
-  // - eq for contrast/brightness/saturation
-  // - noise grain
-  //
-  // crunchWidth controls the *downscale* width.
-  // Example: 320 feels crunchy; 640 feels milder.
-  const downW = Math.max(180, Math.min(960, Number(crunchWidth) || 480));
-  const outW = 1280; // final upscale target (still fits typical outputs)
-  const outH = -2;   // keep aspect ratio
+function pickBody(req, keys) {
+  for (const k of keys) {
+    const v = req.body?.[k];
+    if (v !== undefined && v !== null && v !== "") return v;
+  }
+  return undefined;
+}
 
-  const f = Math.max(4, Math.min(30, Number(fps) || 12));
-  const g = Math.max(0, Math.min(30, Number(grain) || 14));
-  const c = Math.max(0.8, Math.min(1.6, Number(contrast) || 1.2));
-  const b = Math.max(-0.2, Math.min(0.2, Number(brightness) || 0.02));
-  const s = Math.max(0, Math.min(1.5, Number(saturation) || 0.8));
-  const q = Math.max(18, Math.min(35, Number(crf) || 28));
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
 
-  // Nearest-neighbor upscaling = crunchy pixel vibe
+function num(v, fallback) {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : fallback;
+}
+
+// --------------------
+// FFmpeg runner (final look + gamma support)
+// --------------------
+function runFfmpeg({
+  inputPath,
+  outputPath,
+  fps,
+  crunchWidth,
+  grain,
+  contrast,
+  brightness,
+  gamma,
+  saturation,
+  crf,
+}) {
+  const downW = clamp(Math.round(num(crunchWidth, 480)), 180, 960);
+  const outW = 1280;
+  const outH = -2;
+
+  const f = clamp(num(fps, 12), 4, 30);
+  const g = clamp(num(grain, 14), 0, 30);
+  const c = clamp(num(contrast, 1.2), 0.8, 1.6);
+  const b = clamp(num(brightness, 0.02), -0.2, 0.2);
+  const ga = clamp(num(gamma, 1.0), 0.7, 1.4);
+  const s = clamp(num(saturation, 0.8), 0, 1.5);
+  const q = clamp(Math.round(num(crf, 28)), 18, 35);
+
+  // IMPORTANT: saturation + gamma are in eq here.
+  // Noise is after eq so color changes stay visible.
   const vf = [
     `fps=${f}`,
     `scale=${downW}:-2`,
     `scale=${outW}:${outH}:flags=neighbor`,
-    `eq=contrast=${c}:brightness=${b}:saturation=${s}`,
+    `eq=contrast=${c}:brightness=${b}:saturation=${s}:gamma=${ga}`,
     `noise=alls=${g}:allf=t`,
   ].join(",");
 
@@ -102,7 +127,7 @@ function runFfmpeg({ inputPath, outputPath, fps, crunchWidth, grain, contrast, b
     "-vf",
     vf,
 
-    // FORCE a real transcode so effects cannot “accidentally” be bypassed
+    // Force a real transcode so effects can't "pass through"
     "-c:v",
     "libx264",
     "-preset",
@@ -112,7 +137,7 @@ function runFfmpeg({ inputPath, outputPath, fps, crunchWidth, grain, contrast, b
     "-pix_fmt",
     "yuv420p",
 
-    // audio (safe defaults)
+    // audio
     "-c:a",
     "aac",
     "-b:a",
@@ -120,6 +145,9 @@ function runFfmpeg({ inputPath, outputPath, fps, crunchWidth, grain, contrast, b
 
     outputPath,
   ];
+
+  console.log("🎛️ params:", { fps: f, crunchWidth: downW, grain: g, contrast: c, brightness: b, gamma: ga, saturation: s, crf: q });
+  console.log("🎥 ffmpeg:", args.join(" "));
 
   return new Promise((resolve, reject) => {
     const ff = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
@@ -129,7 +157,7 @@ function runFfmpeg({ inputPath, outputPath, fps, crunchWidth, grain, contrast, b
 
     ff.on("close", (code) => {
       if (code === 0) return resolve();
-      console.error("FFmpeg failed:", stderr);
+      console.error("❌ FFmpeg failed:", stderr);
       reject(new Error("ffmpeg failed"));
     });
   });
@@ -145,21 +173,23 @@ async function handleGrunge(req, res) {
     }
 
     const inputPath = req.file.path;
-
-    // Unique output name every time
     const outputPath = path.join(
       outputDir,
       `framecrush-${Date.now()}-${Math.random().toString(16).slice(2)}.mp4`
     );
 
-    // Pull settings (if frontend sends them). If not present, defaults apply.
-    const fps = req.body?.fps;
-    const crunchWidth = req.body?.crunch;
-    const grain = req.body?.grain;
-    const contrast = req.body?.contrast;
-    const brightness = req.body?.brightness;
-    const saturation = req.body?.saturation;
-    const crf = req.body?.crf;
+    // Accept multiple key names (so UI changes don't break backend)
+    const fps = pickBody(req, ["fps", "frameRate", "framerate"]);
+    const crunchWidth = pickBody(req, ["crunch", "width", "downscale", "res"]);
+    const grain = pickBody(req, ["grain", "noise"]);
+    const contrast = pickBody(req, ["contrast", "con"]);
+    const brightness = pickBody(req, ["brightness", "bright"]);
+    const gamma = pickBody(req, ["gamma"]);
+    const saturation = pickBody(req, ["saturation", "sat", "s"]);
+    const crf = pickBody(req, ["crf", "compression"]);
+
+    // Log the raw body once so you can confirm sliders are being sent
+    console.log("📦 raw req.body:", req.body);
 
     await runFfmpeg({
       inputPath,
@@ -169,11 +199,12 @@ async function handleGrunge(req, res) {
       grain,
       contrast,
       brightness,
+      gamma,
       saturation,
       crf,
     });
 
-    // IMPORTANT: return the OUTPUT
+    // IMPORTANT: return OUTPUT
     res.download(outputPath, "framecrush.mp4", (err) => {
       if (err) console.error("Download error:", err);
       safeUnlink(inputPath);
@@ -189,8 +220,6 @@ async function handleGrunge(req, res) {
 // Routes (match your frontend)
 // --------------------
 app.post("/api/grunge", upload.single("video"), handleGrunge);
-
-// Optional aliases (won’t hurt, helps future changes)
 app.post("/api/crush", upload.single("video"), handleGrunge);
 app.post("/crush", upload.single("video"), handleGrunge);
 
